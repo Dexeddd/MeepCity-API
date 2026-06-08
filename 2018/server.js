@@ -23,6 +23,8 @@ process.on("unhandledRejection", (reason) => {
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
+const jsonParser = express.json();
+
 app.use((req, res, next) => {
   if (req.method === "POST" && req.headers["content-encoding"] === "gzip") {
     const chunks = [];
@@ -39,7 +41,13 @@ app.use((req, res, next) => {
       });
     });
   } else {
-    express.json()(req, res, next);
+    jsonParser(req, res, (err) => {
+      if (err) {
+        console.warn("[body-parse] ignored error:", err.message);
+        req.body = {};
+      }
+      next();
+    });
   }
 });
 
