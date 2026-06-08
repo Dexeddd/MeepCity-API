@@ -569,40 +569,45 @@ app.get(`${BASE}/kill_party.php`, (req, res) => {
 });
 
 app.get(`${BASE}/get_party_data.php`, async (req, res) => {
-  const partyId = parseIntSafe(req.query.pid, -1);
-  const POLL_INTERVAL_MS = 500;
-  const POLL_TIMEOUT_MS = 10000;
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  try {
+    const partyId = parseIntSafe(req.query.pid, -1);
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 10000;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
 
-  while (true) {
-    const party = parties.get(partyId);
-    if (party && !party.dead) {
-      cleanupPresence();
-      party.playersOnline = getOnlinePartyPlayerCount(party.partyId);
-      return res.json({
-        Response: "SUCCESS",
-        PartyId: party.partyId,
-        PartyOwner: party.ownerId,
-        PartyOwnerId: party.ownerId,
-        PartyOwnerUsername: party.ownerUsername,
-        PartyTitle: party.title,
-        PartyReserveId: party.reserveId,
-        PartyPlayersOnline: party.playersOnline,
-        PartyMaxPlayers: party.maxPlayers,
-        PartyEstateTier: party.estateTier,
-        PartyEstateVW: party.estateVW,
-        PartyCategory: party.category,
-        PartyLanguage: party.language,
-        PartyThumbsUp: party.thumbsUp,
-        PartyIsModerated: party.moderated ? 1 : 0,
-      });
+    while (true) {
+      const party = parties.get(partyId);
+      if (party && !party.dead) {
+        cleanupPresence();
+        party.playersOnline = getOnlinePartyPlayerCount(party.partyId);
+        return res.json({
+          Response: "SUCCESS",
+          PartyId: party.partyId,
+          PartyOwner: party.ownerId,
+          PartyOwnerId: party.ownerId,
+          PartyOwnerUsername: party.ownerUsername,
+          PartyTitle: party.title,
+          PartyReserveId: party.reserveId,
+          PartyPlayersOnline: party.playersOnline,
+          PartyMaxPlayers: party.maxPlayers,
+          PartyEstateTier: party.estateTier,
+          PartyEstateVW: party.estateVW,
+          PartyCategory: party.category,
+          PartyLanguage: party.language,
+          PartyThumbsUp: party.thumbsUp,
+          PartyIsModerated: party.moderated ? 1 : 0,
+        });
+      }
+
+      if (Date.now() >= deadline) {
+        return res.json({ Response: "NOTFOUND" });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
-
-    if (Date.now() >= deadline) {
-      return res.json({ Response: "NOTFOUND" });
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  } catch (err) {
+    console.error("[get_party_data] error:", err);
+    res.json({ Response: "NOTFOUND" });
   }
 });
 
@@ -1013,124 +1018,135 @@ app.get(`${BASE}/register_party_server.php`, (req, res) => {
 // Atomically grabs one available subplace server for this party.
 // GET /games/meepcity/claim_party_server.php?partyid=...&placeid=...
 app.get(`${BASE}/claim_party_server.php`, async (req, res) => {
-  const partyId = parseIntSafe(req.query.partyid, 0);
-  const placeId = normalizeString(req.query.placeid, "").trim();
-  log("claim_party_server", { partyId, placeId });
+  try {
+    const partyId = parseIntSafe(req.query.partyid, 0);
+    const placeId = normalizeString(req.query.placeid, "").trim();
+    log("claim_party_server", { partyId, placeId });
 
-  if (!partyId) {
-    return res.json({ Response: "ERROR", Message: "Missing partyid" });
-  }
-
-  const POLL_INTERVAL_MS = 500;
-  const POLL_TIMEOUT_MS = 10000;
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-  function findBest() {
-    cleanupPartyJobPool();
-    let best = null;
-
-    // Prefer servers matching placeId
-    for (const entry of partyJobPool.values()) {
-      if (entry.status === "available" && (!placeId || entry.placeId === placeId)) {
-        if (!best || entry.updatedAt < best.updatedAt) best = entry;
-      }
+    if (!partyId) {
+      return res.json({ Response: "ERROR", Message: "Missing partyid" });
     }
 
-    // Fallback: any available server
-    if (!best && placeId) {
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 10000;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+
+    function findBest() {
+      cleanupPartyJobPool();
+      let best = null;
+
       for (const entry of partyJobPool.values()) {
-        if (entry.status === "available") {
+        if (entry.status === "available" && (!placeId || entry.placeId === placeId)) {
           if (!best || entry.updatedAt < best.updatedAt) best = entry;
         }
       }
-      if (best) console.warn(`[POOL] No server matched placeId=${placeId}, falling back to jobId=${best.jobId}`);
+
+      if (!best && placeId) {
+        for (const entry of partyJobPool.values()) {
+          if (entry.status === "available") {
+            if (!best || entry.updatedAt < best.updatedAt) best = entry;
+          }
+        }
+        if (best) console.warn(`[POOL] No server matched placeId=${placeId}, falling back to jobId=${best.jobId}`);
+      }
+
+      return best;
     }
 
-    return best;
-  }
+    while (true) {
+      const best = findBest();
 
-  // Poll until a server is available or we time out
-  while (true) {
-    const best = findBest();
+      if (best) {
+        best.status = "claimed";
+        best.partyId = partyId;
+        best.updatedAt = unixtime();
+        partyJobPool.set(best.jobId, best);
+        console.log(`[POOL] Claimed jobId=${best.jobId} for partyId=${partyId}`);
+        return res.json({ Response: "SUCCESS", JobId: best.jobId });
+      }
 
-    if (best) {
-      best.status = "claimed";
-      best.partyId = partyId;
-      best.updatedAt = unixtime();
-      partyJobPool.set(best.jobId, best);
-      console.log(`[POOL] Claimed jobId=${best.jobId} for partyId=${partyId}`);
-      return res.json({ Response: "SUCCESS", JobId: best.jobId });
+      if (Date.now() >= deadline) {
+        console.warn(`[POOL] Timed out waiting for a subplace server for partyId=${partyId}`);
+        return res.json({ Response: "NONE" });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
-
-    if (Date.now() >= deadline) {
-      console.warn(`[POOL] Timed out waiting for a subplace server for partyId=${partyId}`);
-      return res.json({ Response: "NONE" });
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  } catch (err) {
+    console.error("[claim_party_server] error:", err);
+    res.json({ Response: "NONE" });
   }
 });
 
 // Called by a subplace server polling to find out which party it owns.
 // GET /games/meepcity/get_assigned_party.php?jobid=...
 app.get(`${BASE}/get_assigned_party.php`, async (req, res) => {
-  const jobId = normalizeString(req.query.jobid, "").trim();
-  log("get_assigned_party", { jobId });
+  try {
+    const jobId = normalizeString(req.query.jobid, "").trim();
+    log("get_assigned_party", { jobId });
 
-  if (!jobId) {
-    return res.json({ Response: "ERROR", Message: "Missing jobid" });
-  }
+    if (!jobId) {
+      return res.json({ Response: "ERROR", Message: "Missing jobid" });
+    }
 
-  const POLL_INTERVAL_MS = 500;
-  const POLL_TIMEOUT_MS = 10000;
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 10000;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
 
-  while (true) {
-    const entry = partyJobPool.get(jobId);
+    while (true) {
+      const entry = partyJobPool.get(jobId);
 
-    if (entry) {
-      entry.updatedAt = unixtime(); // Refresh TTL
-      if (entry.status === "claimed" && entry.partyId) {
-        return res.json({ Response: "SUCCESS", PartyId: entry.partyId });
+      if (entry) {
+        entry.updatedAt = unixtime();
+        if (entry.status === "claimed" && entry.partyId) {
+          return res.json({ Response: "SUCCESS", PartyId: entry.partyId });
+        }
       }
-    }
 
-    if (Date.now() >= deadline) {
-      // Return 0 — server should keep polling on its own schedule
-      return res.json({ Response: "SUCCESS", PartyId: 0 });
-    }
+      if (Date.now() >= deadline) {
+        return res.json({ Response: "SUCCESS", PartyId: 0 });
+      }
 
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+  } catch (err) {
+    console.error("[get_assigned_party] error:", err);
+    res.json({ Response: "SUCCESS", PartyId: 0 });
   }
 });
 
 // Called by the MAIN server when a player joins a party, to get its JobId.
 // GET /games/meepcity/get_party_jobid.php?partyid=...
 app.get(`${BASE}/get_party_jobid.php`, async (req, res) => {
-  const partyId = parseIntSafe(req.query.partyid, 0);
-  log("get_party_jobid", { partyId });
+  try {
+    const partyId = parseIntSafe(req.query.partyid, 0);
+    log("get_party_jobid", { partyId });
 
-  if (!partyId) {
-    return res.json({ Response: "ERROR", Message: "Missing partyid" });
-  }
+    if (!partyId) {
+      return res.json({ Response: "ERROR", Message: "Missing partyid" });
+    }
 
-  const POLL_INTERVAL_MS = 500;
-  const POLL_TIMEOUT_MS = 10000;
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 10000;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
 
-  while (true) {
-    for (const entry of partyJobPool.values()) {
-      if (entry.partyId === partyId && entry.status === "claimed") {
-        return res.json({ Response: "SUCCESS", JobId: entry.jobId });
+    while (true) {
+      for (const entry of partyJobPool.values()) {
+        if (entry.partyId === partyId && entry.status === "claimed") {
+          return res.json({ Response: "SUCCESS", JobId: entry.jobId });
+        }
       }
-    }
 
-    if (Date.now() >= deadline) {
-      console.warn(`[POOL] Timed out waiting for jobId for partyId=${partyId}`);
-      return res.json({ Response: "NONE" });
-    }
+      if (Date.now() >= deadline) {
+        console.warn(`[POOL] Timed out waiting for jobId for partyId=${partyId}`);
+        return res.json({ Response: "NONE" });
+      }
 
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+  } catch (err) {
+    console.error("[get_party_jobid] error:", err);
+    res.json({ Response: "NONE" });
   }
 });
 
