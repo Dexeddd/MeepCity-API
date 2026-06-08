@@ -1028,6 +1028,20 @@ app.get(`${BASE}/claim_party_server.php`, (req, res) => {
     }
   }
 
+  // Fallback: if placeId filter matched nothing, try any available server
+  if (!best && placeId) {
+    for (const entry of partyJobPool.values()) {
+      if (entry.status === "available") {
+        if (!best || entry.updatedAt < best.updatedAt) {
+          best = entry;
+        }
+      }
+    }
+    if (best) {
+      console.warn(`[POOL] No server matched placeId=${placeId}, falling back to jobId=${best.jobId}`);
+    }
+  }
+
   if (!best) {
     console.warn(`[POOL] No available subplace server for partyId=${partyId}`);
     return res.json({ Response: "NONE" });
@@ -1104,6 +1118,12 @@ app.get(`${BASE}/release_party_server.php`, (req, res) => {
   }
 
   res.json({ Response: "SUCCESS" });
+});
+
+// ─── Global Error Handler ─────────────────────────────────────────────────────
+app.use((err, req, res, _next) => {
+  console.error(`[ERROR] ${req.method} ${req.path}:`, err);
+  res.status(500).json({ Response: "ERROR", Message: err.message || "Internal server error" });
 });
 
 app.listen(PORT, () => {
