@@ -55,6 +55,22 @@ const reportedSounds = new Map();
 const friends = new Map();
 const friendRequests = new Map();
 
+// ─── Party Job Pool ───────────────────────────────────────────────────────────
+// Maps jobId (string) → { jobId, placeId, status, partyId, updatedAt }
+// status: "available" | "claimed"
+const partyJobPool = new Map();
+const PARTY_JOB_TTL_SECONDS = 120; // drop servers we haven't heard from in 2 min
+
+function cleanupPartyJobPool() {
+  const cutoff = unixtime() - PARTY_JOB_TTL_SECONDS;
+  for (const [jobId, entry] of partyJobPool) {
+    // Only evict available slots; claimed ones are owned by an active party
+    if (entry.updatedAt < cutoff && entry.status === "available") {
+      partyJobPool.delete(jobId);
+    }
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function unixtime() {
@@ -954,6 +970,140 @@ app.post("/admin/moderate_party/:pid", (req, res) => {
   if (!party) return res.status(404).json({ error: "Party not found" });
   party.moderated = true;
   res.json({ ok: true, party: serializeParty(party) });
+});
+
+// ─── Party Job Pool Endpoints ─────────────────────────────────────────────────
+
+// Called by a subplace server on startup to register its JobId as available.
+// GET /games/meepcity/register_party_server.php?jobid=...&placeid=...
+app.get(`${BASE}/register_party_server.php`, (req, res) => {
+  const jobId = normalizeString(req.query.jobid, "").trim();
+  const placeId = normalizeString(req.query.placeid, "").trim();
+  log("register_party_server", { jobId, placeId });
+
+  if (!jobId) {
+    return res.json({ Response: "ERROR", Message: "Missing jobid" });
+  }
+
+  const existing = partyJobPool.get(jobId);
+
+  // If this server was previously claimed, keep its party assignment intact
+  // (it may be re-registering after a brief disconnect).
+  partyJobPool.set(jobId, {
+    jobId,
+    placeId,
+    status: existing && existing.status === "claimed" ? "claimed" : "available",
+    partyId: existing ? existing.partyId : 0,
+    updatedAt: unixtime(),
+  });
+
+  console.log(`[POOL] Registered subplace server jobId=${jobId} placeId=${placeId}`);
+  res.json({ Response: "SUCCESS" });
+});
+
+// Called by the MAIN server when a party is created.
+// Atomically grabs one available subplace server for this party.
+// GET /games/meepcity/claim_party_server.php?partyid=...&placeid=...
+app.get(`${BASE}/claim_party_server.php`, (req, res) => {
+  const partyId = parseIntSafe(req.query.partyid, 0);
+  const placeId = normalizeString(req.query.placeid, "").trim();
+  log("claim_party_server", { partyId, placeId });
+
+  if (!partyId) {
+    return res.json({ Response: "ERROR", Message: "Missing partyid" });
+  }
+
+  cleanupPartyJobPool();
+
+  // Find the oldest available server for this placeId.
+  let best = null;
+  for (const entry of partyJobPool.values()) {
+    if (
+      entry.status === "available" &&
+      (!placeId || entry.placeId === placeId)
+    ) {
+      if (!best || entry.updatedAt < best.updatedAt) {
+        best = entry;
+      }
+    }
+  }
+
+  if (!best) {
+    console.warn(`[POOL] No available subplace server for partyId=${partyId}`);
+    return res.json({ Response: "NONE" });
+  }
+
+  // Claim it atomically.
+  best.status = "claimed";
+  best.partyId = partyId;
+  best.updatedAt = unixtime();
+  partyJobPool.set(best.jobId, best);
+
+  console.log(`[POOL] Claimed jobId=${best.jobId} for partyId=${partyId}`);
+  res.json({ Response: "SUCCESS", JobId: best.jobId });
+});
+
+// Called by a subplace server polling to find out which party it owns.
+// GET /games/meepcity/get_assigned_party.php?jobid=...
+app.get(`${BASE}/get_assigned_party.php`, (req, res) => {
+  const jobId = normalizeString(req.query.jobid, "").trim();
+  log("get_assigned_party", { jobId });
+
+  if (!jobId) {
+    return res.json({ Response: "ERROR", Message: "Missing jobid" });
+  }
+
+  const entry = partyJobPool.get(jobId);
+
+  if (!entry) {
+    // Server not registered yet; tell it to keep waiting.
+    return res.json({ Response: "SUCCESS", PartyId: 0 });
+  }
+
+  // Refresh TTL so the server stays alive while it polls.
+  entry.updatedAt = unixtime();
+
+  res.json({ Response: "SUCCESS", PartyId: entry.partyId || 0 });
+});
+
+// Called by the MAIN server when a player joins a party, to get its JobId.
+// GET /games/meepcity/get_party_jobid.php?partyid=...
+app.get(`${BASE}/get_party_jobid.php`, (req, res) => {
+  const partyId = parseIntSafe(req.query.partyid, 0);
+  log("get_party_jobid", { partyId });
+
+  if (!partyId) {
+    return res.json({ Response: "ERROR", Message: "Missing partyid" });
+  }
+
+  for (const entry of partyJobPool.values()) {
+    if (entry.partyId === partyId && entry.status === "claimed") {
+      return res.json({ Response: "SUCCESS", JobId: entry.jobId });
+    }
+  }
+
+  res.json({ Response: "NONE" });
+});
+
+// Called by a subplace server when its party ends or it shuts down.
+// GET /games/meepcity/release_party_server.php?jobid=...
+app.get(`${BASE}/release_party_server.php`, (req, res) => {
+  const jobId = normalizeString(req.query.jobid, "").trim();
+  log("release_party_server", { jobId });
+
+  if (!jobId) {
+    return res.json({ Response: "ERROR", Message: "Missing jobid" });
+  }
+
+  const entry = partyJobPool.get(jobId);
+  if (entry) {
+    // Roblox servers are ephemeral; just remove it from the pool.
+    // A fresh server will register itself when Roblox spins up a replacement.
+    partyJobPool.delete(jobId);
+    console.log(`[POOL] Released jobId=${jobId} (was partyId=${entry.partyId})`);
+  }
+
+  res.json({ Response: "SUCCESS" });
 });
 
 app.listen(PORT, () => {
