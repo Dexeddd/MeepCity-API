@@ -62,6 +62,7 @@ const PRESENCE_TTL_SECONDS = 90;
 
 const parties = new Map();
 let partyCounter = 1;
+const PARTY_HEARTBEAT_TTL_SECONDS = 30; // kill party if no update_party call for this long
 
 const assetSales = new Map();
 const bannedPlayers = [];
@@ -539,6 +540,7 @@ app.get(`${BASE}/create_party.php`, (req, res) => {
     language: normalizePartyLanguage(q.language),
     estateVW: parseIntSafe(q.estatevw, 0),
     created: unixtime(),
+    lastHeartbeat: unixtime(),
     moderated: false,
     dead: false,
   });
@@ -553,6 +555,7 @@ app.get(`${BASE}/update_party.php`, (req, res) => {
 
   if (party) {
     party.playersOnline = parseIntSafe(players, 0);
+    party.lastHeartbeat = unixtime();
     if (party.playersOnline <= 0 && !party.dead) {
       party.dead = true;
       console.log(`[PARTY] Party #${pid} auto-killed (empty)`);
@@ -1201,6 +1204,18 @@ app.use((err, req, res, _next) => {
   console.error(`[ERROR] ${req.method} ${req.path}:`, err);
   res.status(500).json({ Response: "ERROR", Message: err.message || "Internal server error" });
 });
+
+// Periodically kill parties that haven't sent a heartbeat — covers the case
+// where the subplace server crashes or never calls update_party.
+setInterval(() => {
+  const cutoff = unixtime() - PARTY_HEARTBEAT_TTL_SECONDS;
+  for (const [pid, party] of parties) {
+    if (!party.dead && (party.lastHeartbeat || party.created) < cutoff) {
+      party.dead = true;
+      console.log(`[PARTY] Party #${pid} auto-killed (stale, no heartbeat)`);
+    }
+  }
+}, 10_000);
 
 app.listen(PORT, () => {
   console.log(`
