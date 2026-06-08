@@ -553,6 +553,10 @@ app.get(`${BASE}/update_party.php`, (req, res) => {
 
   if (party) {
     party.playersOnline = parseIntSafe(players, 0);
+    if (party.playersOnline <= 0 && !party.dead) {
+      party.dead = true;
+      console.log(`[PARTY] Party #${pid} auto-killed (empty)`);
+    }
   }
 
   res.json({
@@ -1150,6 +1154,12 @@ app.get(`${BASE}/get_party_jobid.php`, async (req, res) => {
         if (entry.partyId === partyId && entry.status === "claimed") {
           return res.json({ Response: "SUCCESS", JobId: entry.jobId });
         }
+      }
+
+      // Fallback: use the party's reserveId as the JobId (set at party creation)
+      const party = parties.get(partyId);
+      if (party && !party.dead && party.reserveId) {
+        return res.json({ Response: "SUCCESS", JobId: party.reserveId });
       }
 
       if (Date.now() >= deadline) {
