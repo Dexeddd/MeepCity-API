@@ -14,6 +14,13 @@ const zlib = require("zlib");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 app.use((req, res, next) => {
