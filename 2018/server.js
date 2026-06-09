@@ -13,6 +13,7 @@ const express = require("express");
 const zlib = require("zlib");
 const app = express();
 const PORT = process.env.PORT || 3000;
+const PARTY_HEARTBEAT_TTL_SECONDS = 120; // was 30
 
 process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err);
