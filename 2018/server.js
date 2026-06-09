@@ -64,6 +64,10 @@ const parties = new Map();
 let partyCounter = 1;
 const PARTY_HEARTBEAT_TTL_SECONDS = 30; // kill party if no update_party call for this long
 
+// userId → { partyId, assignedAt } — written before teleport, read+deleted on arrival
+const partyAssignments = new Map();
+const PARTY_ASSIGN_TTL_SECONDS = 120;
+
 const assetSales = new Map();
 const bannedPlayers = [];
 const badSounds = [];
@@ -1197,6 +1201,52 @@ app.get(`${BASE}/release_party_server.php`, (req, res) => {
   }
 
   res.json({ Response: "SUCCESS" });
+});
+
+
+// ─── Party Assignment Endpoints (multi-party) ────────────────────────────────
+
+// Called by main server BEFORE teleporting a player to a party subplace.
+// GET /games/meepcity/assign_party.php?uid=...&partyid=...
+app.get(`${BASE}/assign_party.php`, (req, res) => {
+  const userId  = parseIntSafe(req.query.uid,     0);
+  const partyId = parseIntSafe(req.query.partyid, 0);
+  log("assign_party", { userId, partyId });
+
+  if (!userId || !partyId) {
+    return res.json({ Response: "ERROR", Message: "Missing uid or partyid" });
+  }
+
+  partyAssignments.set(userId, { partyId, assignedAt: unixtime() });
+  console.log(`[ASSIGN] userId=${userId} → partyId=${partyId}`);
+  res.json({ Response: "SUCCESS" });
+});
+
+// Called by subplace server when a player arrives, to look up their party.
+// GET /games/meepcity/get_player_party.php?uid=...
+// Consumes the assignment (deletes it) after reading so it doesn't linger.
+app.get(`${BASE}/get_player_party.php`, (req, res) => {
+  const userId = parseIntSafe(req.query.uid, 0);
+  log("get_player_party", { userId });
+
+  if (!userId) {
+    return res.json({ Response: "ERROR", Message: "Missing uid" });
+  }
+
+  // Evict stale assignments first.
+  const cutoff = unixtime() - PARTY_ASSIGN_TTL_SECONDS;
+  for (const [uid, entry] of partyAssignments) {
+    if (entry.assignedAt < cutoff) partyAssignments.delete(uid);
+  }
+
+  const assignment = partyAssignments.get(userId);
+  if (!assignment) {
+    return res.json({ Response: "NONE", PartyId: 0 });
+  }
+
+  partyAssignments.delete(userId);
+  console.log(`[ASSIGN] Consumed: userId=${userId} → partyId=${assignment.partyId}`);
+  res.json({ Response: "SUCCESS", PartyId: assignment.partyId });
 });
 
 // ─── Global Error Handler ─────────────────────────────────────────────────────
