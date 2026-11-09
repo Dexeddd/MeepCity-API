@@ -63,7 +63,6 @@ const PRESENCE_TTL_SECONDS = 90;
 
 const parties = new Map();
 let partyCounter = 1;
-const PARTY_HEARTBEAT_TTL_SECONDS = 120; // kill party if no update_party call for this long
 
 // userId → { partyId, assignedAt } — written before teleport, read+deleted on arrival
 const partyAssignments = new Map();
